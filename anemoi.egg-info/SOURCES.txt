@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+anemoi.egg-info/PKG-INFO
+anemoi.egg-info/SOURCES.txt
+anemoi.egg-info/dependency_links.txt
+anemoi.egg-info/requires.txt
+anemoi.egg-info/top_level.txt
+shared/__init__.py
+shared/constants.py
+shared/io.py
+shared/meteo_math.py

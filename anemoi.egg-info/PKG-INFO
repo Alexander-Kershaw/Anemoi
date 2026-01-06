@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: anemoi
+Version: 0.1.0
+Summary: Meteorological portfolio combining data engineering, ML, and visualization
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pandas>=2.1
+Requires-Dist: numpy>=1.26
+Requires-Dist: pyarrow>=14.0
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: meteostat>=1.6
+
+# Anemoi
+
+A modular meteorological portfolio combining atmospheric science,
+data engineering, machine learning, and visualization.
+
+Inspired by the Anemoi — the four wind gods of Greek mythology —
+each module represents a distinct aspect of operational weather systems.
+
