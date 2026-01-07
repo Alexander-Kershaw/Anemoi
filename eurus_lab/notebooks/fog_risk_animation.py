@@ -15,7 +15,7 @@ with fog/low-cloud risk highlighted, along with nighttime shading based on local
 
 # Load data fro m curated parquet files for London (demo location), change as needed in ingest_meteostat.py main()
 base = Path("notus_lab/data/curated/meteostat_hourly/location_name=London")
-files = sorted(base.rglob("hourly.parquet"))
+files = sorted(base.rglob("hourly.parquet")) # Load all parquet files in the location directory
 
 df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 df = df.sort_values("timestamp_utc").reset_index(drop=True)

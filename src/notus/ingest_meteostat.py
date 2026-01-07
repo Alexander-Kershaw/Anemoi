@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import meteostat as ms
 from termcolor import colored
+from zoneinfo import ZoneInfo
 
 from shared.meteo_math import (
     wind_spd_kmh_to_ms,
@@ -14,7 +15,6 @@ from shared.meteo_math import (
     vapor_pressure_from_dewpoint_hpa,
     specific_humidity_g_per_kg,
 )
-
 
 """
 Notus: Ingest hourly surface observations (Meteostat)
@@ -30,7 +30,6 @@ Why we do station-first (instead of point-first):
 - It’s more reliable across Meteostat API variants because some don’t support point-based queries
 - It avoids empty results for some point-based queries 
 """
-
 
 # Configuration data classes
 @dataclass(frozen=True)
@@ -212,35 +211,103 @@ def derive_variables(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _night_mask_local(timestamp_utc: pd.Series, tz_name: str = "Europe/London") -> pd.Series:
+    """
+    Return boolean mask for nighttime hours in local time.
+    Night definition (simple): 21:00–06:00 local.
+    """
+    ts = pd.to_datetime(timestamp_utc, utc=True)
+    ts_local = ts.dt.tz_convert(ZoneInfo(tz_name))
+    h = ts_local.dt.hour
+    return (h >= 21) | (h <= 6)
+
+
+def _apply_persistence(flag: pd.Series, min_consecutive_hours: int = 2) -> pd.Series:
+    """
+    Require events to persist for at least `min_consecutive_hours`.
+
+    For min_consecutive_hours=2, we keep hours that are part of at least a 2-hour run.
+    This removes isolated single-hour spikes.
+
+    Note: assumes data is roughly hourly. We'll make it more strict later if needed.
+    """
+    f = flag.fillna(0).astype(int)
+
+    if min_consecutive_hours <= 1:
+        return f.astype("int8")
+
+    # For 2-hour persistence: keep hours that have a neighbor also flagged
+    if min_consecutive_hours == 2:
+        keep = (f == 1) & ((f.shift(1, fill_value=0) == 1) | (f.shift(-1, fill_value=0) == 1))
+        return keep.astype("int8")
+
+    # For >2 hours: rolling window count (centered)
+    # Keeps hours that lie within any window of length min_consecutive_hours with all ones.
+    roll = f.rolling(window=min_consecutive_hours, min_periods=min_consecutive_hours).sum()
+    # Mark window endings, then expand back to all hours inside valid windows
+    window_ok = (roll == min_consecutive_hours)
+    expanded = pd.Series(False, index=f.index)
+    for idx in window_ok[window_ok].index:
+        expanded.loc[idx - (min_consecutive_hours - 1): idx] = True
+    keep = (f == 1) & expanded
+    return keep.astype("int8")
+
+
 def detect_fog_risk(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Identify hours with risk of fog formation based on meteorological conditions
+    Add fog/low-cloud diagnostics based on simple physical rules
 
-    Simple heuristic based on:
-    - Dew point depression ≤ 2 °C  -> near saturation
-    - Wind speed ≤ 3 m/s           -> weak mixing
-    - Nighttime hours              -> radiative cooling
+    Outputs:
+    - fog_risk_v1: baseline rule (UTC-night; no persistence)
+    - fog_risk_v2: improved rule (local-night; persistence >=2 hours)
+    - fog_risk: alias to fog_risk_v1 (so downstream code won't break)
+    - fog_risk_score: continuous 0..1 score (useful for tuning/ML))
 
-    This is a diahgnostic flag NOT a forcast
+    Baseline physical logic:
+    - near saturation: dewpoint_depression_c <= 2°C
+    - light wind: wspd_ms <= 3 m/s
+    - nighttime: defined by hour range
     """
     out = df.copy()
 
-    # Nighttime definition (UTC-based, simple)
-    hour = out["timestamp_utc"].dt.hour
-    is_night = (hour >= 21) | (hour <= 6) # 9 PM to 6 AM UTC
+    # Ensure required features exist in the DataFrame
+    if "dewpoint_depression_c" not in out.columns and "temp" in out.columns and "dwpt_c" in out.columns:
+        out["dewpoint_depression_c"] = out["temp"] - out["dwpt_c"]
 
-    # Conditions for fog risk
-    near_saturation = out["dewpoint_depression_c"] <= 2.0
+    required = ["timestamp_utc", "dewpoint_depression_c", "wspd_ms"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise RuntimeError(f"Fog diagnostic missing required columns: {missing}")
+
+    # Core physical conditions
+    near_saturation = out["dewpoint_depression_c"] <= 2.0 
     light_wind = out["wspd_ms"] <= 3.0
 
-    out["fog_risk"] = (
-        near_saturation
-        & light_wind
-        & is_night
-    ).astype("int8") 
+    # v1: UTC night (21:00–06:00) + no persistence
+    hour_utc = pd.to_datetime(out["timestamp_utc"], utc=True).dt.hour
+    night_utc = (hour_utc >= 21) | (hour_utc <= 6) # UTC nighttime mask
+
+    fog_v1 = (near_saturation & light_wind & night_utc).astype("int8")
+    out["fog_risk_v1"] = fog_v1
+
+    # v2: Local night + persistence >=2 hours
+    night_local = _night_mask_local(out["timestamp_utc"], tz_name="Europe/London")
+    fog_raw_v2 = (near_saturation & light_wind & night_local).astype("int8")
+    out["fog_risk_v2"] = _apply_persistence(fog_raw_v2, min_consecutive_hours=2)
+
+    # Backwards-compatible alias (I dont want to break Eurus/Boreas)
+    out["fog_risk"] = out["fog_risk_v1"]
+
+    # Continuous score (0..1): how strongly conditions support fog risk at this hour
+    # Saturation factor: 1 at 0°C depression, 0 at >=2°C 
+    sat = (2.0 - out["dewpoint_depression_c"]).clip(lower=0.0, upper=2.0) / 2.0
+    # Wind factor: 1 at 0 m/s, 0 at >=3 m/s
+    wnd = (3.0 - out["wspd_ms"]).clip(lower=0.0, upper=3.0) / 3.0
+    nmask = night_local.astype(float)
+
+    out["fog_risk_score"] = (sat * wnd * nmask).astype(float)
 
     return out
-
 
 
 def write_partitioned_parquet(df: pd.DataFrame, out_dir: Path) -> None:
@@ -285,6 +352,17 @@ def main() -> None:
     curated = derive_variables(curated) # Add derived variables
     curated = detect_fog_risk(curated)  # Add fog risk diagnostic flag
 
+    # Fog risk summary report
+    def _pct(x: int, n: int) -> float:
+        return 100.0 * x / n if n else 0.0 # avoid division by zero
+
+    # Fog risk summary
+    n = len(curated)
+    v1 = int(curated["fog_risk_v1"].sum()) if "fog_risk_v1" in curated.columns else 0
+    v2 = int(curated["fog_risk_v2"].sum()) if "fog_risk_v2" in curated.columns else 0
+    print(colored(f"\nFog/low-cloud risk v1 hours: {v1} ({_pct(v1, n):.1f}%)", "yellow")) # print summary of fog risk v1 percentage of hours wuth risk of fog/low-cloud
+    print(colored(f"Fog/low-cloud risk v2 hours: {v2} ({_pct(v2, n):.1f}%)", "yellow")) # print summary of fog risk v2 percentage of hours wuth risk of fog/low-cloud
+
 
     # Missingness report, important for understanding data quality
     def _missing_val_report(df: pd.DataFrame, cols: list[str]) -> None:
@@ -304,28 +382,18 @@ def main() -> None:
         for k, v in report.items():
             print(f"  {k}: {v}%")
 
-
-
     out_dir = Path("notus_lab/data/curated/meteostat_hourly")
     write_partitioned_parquet(curated, out_dir)
 
     print(colored(f"Wrote curated Parquet partitions to: {out_dir.resolve()}", "green"))
 
-    
     # Report missingness for key variables
     _missing_val_report(curated, [
-    "temp", "rhum", "pres", "wspd", "wdir", "prcp",
-    "wspd_ms", "u_ms", "v_ms", "dpres_1h_hpa", "is_rain_hour",
-    "dwpt_c", "e_hpa", "q_gkg"])
-
+    "dewpoint_depression_c", "fog_risk", "fog_risk_v1", "fog_risk_v2", "fog_risk_score"])
 
     # Fog risk summary
     fog_hours = curated["fog_risk"].sum()
     total_hours = len(curated)
-
-    print(colored(
-        f"\nFog / low-cloud risk hours: {fog_hours} "
-        f"({100 * fog_hours / total_hours:.1f}% of all hours)", "yellow")) # Percentage of hours with risk of fog / low clouds
 
 
 if __name__ == "__main__":
