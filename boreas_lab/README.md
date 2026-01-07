@@ -76,3 +76,31 @@ Each event includes duration, mean sustained wind, peak gust, and a severity sco
 ### Plots
 ![Wind event duration](notebooks/outputs/wind_event_duration_hist.png)
 ![Wind event severity vs duration](notebooks/outputs/wind_event_severity_vs_duration.png)
+
+
+***
+***
+
+## Heavy-Rain Events
+
+Heavy-rain events are identified using hourly precipitation rates and grouped into contiguous episodes.
+
+### Event definition (v1)
+- Hourly precipitation ≥ 2 mm/hr
+- Events persist ≥ 2 hours
+
+### Metrics
+Each event includes:
+- duration (hours)
+- total accumulation (mm)
+- peak hourly rate (mm/hr)
+- severity score combining accumulation, intensity, and duration
+
+### Results
+In this sample window, only a small number of heavy-rain events are detected, reflecting the generally low-intensity, intermittent nature of rainfall in London during Autumn time. Detected events correspond to sustained moderate-to-heavy rainfall capable of causing surface water impacts.
+
+### Plots
+![Rain event duration](notebooks/outputs/rain_event_duration_hist.png)
+![Rain event severity vs accumulation](notebooks/outputs/rain_event_severity_vs_accum.png)
+
+
