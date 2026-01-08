@@ -24,8 +24,6 @@ anemoi/
 └── src/ # Shared Python packages
 ```
 
-```yaml
-
 Each module is named after one of the Anemoi (wind deities of greek mythology), each representing key layers of the pipeline.
 
 ---
@@ -122,4 +120,4 @@ Planned extensions include:
 - Expanded geographic coverage
 
 
-```
+***
